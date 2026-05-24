@@ -7,6 +7,9 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 @SpringBootApplication
 public class DemoApplication {
@@ -18,11 +21,16 @@ public class DemoApplication {
 class IdempotencyRecord {
     enum Status { IN_FLIGHT, COMPLETED }
     private final String bodyString;
+    private final long createdAt; // Developer's Choice: Track entry lifetime
     private Status status = Status.IN_FLIGHT;
     private String responseBody;
 
-    public IdempotencyRecord(String bodyString) { this.bodyString = bodyString; }
+    public IdempotencyRecord(String bodyString) { 
+        this.bodyString = bodyString; 
+        this.createdAt = System.currentTimeMillis();
+    }
     public String getBodyString() { return bodyString; }
+    public long getCreatedAt() { return createdAt; }
     public Status getStatus() { return status; }
     public void setStatus(Status status) { this.status = status; }
     public String getResponseBody() { return responseBody; }
@@ -33,6 +41,15 @@ class IdempotencyRecord {
 @RequestMapping("/process-payment")
 class PaymentController {
     private final ConcurrentHashMap<String, IdempotencyRecord> storage = new ConcurrentHashMap<>();
+    
+    // Developer's Choice: Background cleaner scheduling service
+    private final ScheduledExecutorService cleanerService = Executors.newSingleThreadScheduledExecutor();
+    private static final long TTL_MS = TimeUnit.MINUTES.toMillis(5); // 5-minute validity window
+
+    public PaymentController() {
+        // Run memory eviction cycle every 60 seconds automatically
+        this.cleanerService.scheduleAtFixedRate(this::evictExpiredKeys, 1, 1, TimeUnit.MINUTES);
+    }
 
     @PostMapping
     public ResponseEntity<?> processPayment(
@@ -86,5 +103,15 @@ class PaymentController {
         } catch (Exception e) {
             return ResponseEntity.internalServerError().build();
         }
+    }
+
+    // Developer's Choice: Eviction function loop to protect server memory bounds
+    private void evictExpiredKeys() {
+        long now = System.currentTimeMillis();
+        storage.entrySet().removeIf(entry -> {
+            boolean isExpired = (now - entry.getValue().getCreatedAt()) > TTL_MS;
+            // Only clean up if it's completely finished processing to avoid wiping in-flight active traffic
+            return isExpired && entry.getValue().getStatus() == IdempotencyRecord.Status.COMPLETED;
+        });
     }
 }
